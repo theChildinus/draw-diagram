@@ -23,12 +23,13 @@
 ## 工作方式
 
 1. 先核对代码、配置、接口或其他权威材料，明确图中事实和证据缺口。
-2. 先列节点、边界、关系和主阅读路径，再选择 Mermaid 或 XML。
+2. 先列节点、边界、关系和当前图的主阅读路径，再选择 Mermaid 或 XML。
 3. 标准流程图、时序图、ER 图、类图和状态图优先使用 Mermaid 作为临时创作输入；复杂架构图、网络拓扑图和精确排版使用 XML。
-4. 转换后以 `.drawio` 为准，不维护两份独立事实源。
-5. 先做静态校验，再按视觉风险检查字体、换行、裁切、遮挡、对齐、连线和箭头方向。
+4. 新图默认使用白底、低饱和角色色、圆角节点和简洁正交连线；修改已有图时保留其有效视觉体系。
+5. 转换后以 `.drawio` 为准，不维护两份独立事实源。
+6. 先做静态校验；几何变化增加渲染后连线检查，再按视觉风险检查字体、换行、裁切、遮挡、对齐、连线和箭头方向。
 
-## 静态校验
+## 验证
 
 从 skill 根目录运行：
 
@@ -47,7 +48,20 @@ python3 scripts/validate_drawio.py --strict-warnings \
   '/absolute/path/to/diagram.drawio'
 ```
 
-脚本检查 Draw.io XML 结构和部分文本框几何约束。通过静态校验不等于视觉验收通过。
+修改了节点、端口或连线几何时，检查 Draw.io 实际导出的 SVG：
+
+```bash
+python3 scripts/validate_drawio.py --check-rendered-edges \
+  '/absolute/path/to/diagram.drawio'
+```
+
+运行校验器单测：
+
+```bash
+python3 scripts/test_validate_drawio.py
+```
+
+脚本检查 Draw.io XML 结构、文本框几何，以及渲染后的连线交叉和穿节点问题。通过这些检查仍不等于文字和整体视觉验收通过。
 
 ## 硬性验收
 
@@ -65,7 +79,9 @@ python3 scripts/validate_drawio.py --strict-warnings \
 SKILL.md                    工作流、边界和验收规则
 agents/openai.yaml          Codex 显示信息和显式调用策略
 references/                 执行、XML、Mermaid 和绘图规范
-scripts/validate_drawio.py  XML 与文本框结构校验器
+references/default-visual-style.json  新图默认视觉规范
+scripts/validate_drawio.py            XML、文本框和渲染连线校验器
+scripts/test_validate_drawio.py       校验器单元测试
 ```
 
 参考案例只提供结构模式，不能替代当前项目的事实，也不能直接复制历史项目内容或视觉样式。

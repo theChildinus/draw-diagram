@@ -144,7 +144,7 @@ stateDiagram-v2
 ~~~mermaid
 flowchart LR
   A["开始"]:::primary --> B["完成"]
-  classDef primary fill:#dae8fc,stroke:#6c8ebf,color:#1f2937
+  classDef primary fill:#DBEAFE,stroke:#2563EB,color:#0F172A
 ~~~
 
 转换后仍须检查字体族、字号层级、文本框边界、连线和箭头。无法通过时不要继续堆 Mermaid 样式，转到 XML 局部精修。

@@ -6,14 +6,20 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import html
 import json
+import math
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 @dataclass
@@ -23,6 +29,30 @@ class Issue:
     page: str
     message: str
     cell: str | None = None
+
+
+Point = tuple[float, float]
+Segment = tuple[Point, Point]
+Matrix = tuple[float, float, float, float, float, float]
+IDENTITY_MATRIX: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+@dataclass
+class RenderedEdge:
+    cell_id: str
+    source: str | None
+    target: str | None
+    style: dict[str, str]
+    segments: list[Segment]
+    straight_segments: list[Segment]
+
+    @property
+    def start(self) -> Point | None:
+        return self.segments[0][0] if self.segments else None
+
+    @property
+    def end(self) -> Point | None:
+        return self.segments[-1][1] if self.segments else None
 
 
 def local_name(tag: str) -> str:
@@ -83,6 +113,330 @@ def parse_style(style: str) -> dict[str, str]:
     return result
 
 
+def multiply_matrix(left: Matrix, right: Matrix) -> Matrix:
+    a1, b1, c1, d1, e1, f1 = left
+    a2, b2, c2, d2, e2, f2 = right
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def transform_point(matrix: Matrix, point: Point) -> Point:
+    a, b, c, d, e, f = matrix
+    x, y = point
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def parse_transform(value: str | None) -> Matrix:
+    result = IDENTITY_MATRIX
+    if not value:
+        return result
+
+    for name, payload in re.findall(r"([A-Za-z]+)\s*\(([^)]*)\)", value):
+        values = [float(item) for item in re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", payload)]
+        operation = IDENTITY_MATRIX
+        if name == "matrix" and len(values) == 6:
+            operation = tuple(values)  # type: ignore[assignment]
+        elif name == "translate" and values:
+            operation = (1.0, 0.0, 0.0, 1.0, values[0], values[1] if len(values) > 1 else 0.0)
+        elif name == "scale" and values:
+            operation = (values[0], 0.0, 0.0, values[1] if len(values) > 1 else values[0], 0.0, 0.0)
+        elif name == "rotate" and values:
+            radians = math.radians(values[0])
+            cosine, sine = math.cos(radians), math.sin(radians)
+            rotation: Matrix = (cosine, sine, -sine, cosine, 0.0, 0.0)
+            if len(values) >= 3:
+                cx, cy = values[1], values[2]
+                operation = multiply_matrix(
+                    multiply_matrix((1.0, 0.0, 0.0, 1.0, cx, cy), rotation),
+                    (1.0, 0.0, 0.0, 1.0, -cx, -cy),
+                )
+            else:
+                operation = rotation
+        result = multiply_matrix(result, operation)
+    return result
+
+
+PATH_TOKEN = re.compile(
+    r"[AaCcHhLlMmQqSsTtVvZz]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
+
+
+def parse_svg_path(path_data: str, matrix: Matrix = IDENTITY_MATRIX) -> tuple[list[Segment], list[Segment]]:
+    tokens = PATH_TOKEN.findall(path_data)
+    index = 0
+    command = ""
+    current: Point = (0.0, 0.0)
+    start: Point = current
+    last_quadratic_control: Point | None = None
+    last_cubic_control: Point | None = None
+    segments: list[Segment] = []
+    straight_segments: list[Segment] = []
+
+    def point_at(x: float, y: float, relative: bool) -> Point:
+        return (current[0] + x, current[1] + y) if relative else (x, y)
+
+    def add_line(destination: Point, straight: bool = True) -> None:
+        nonlocal current
+        rendered = (transform_point(matrix, current), transform_point(matrix, destination))
+        segments.append(rendered)
+        if straight:
+            straight_segments.append(rendered)
+        current = destination
+
+    def add_quadratic(control: Point, destination: Point) -> None:
+        nonlocal current
+        origin = current
+        previous = origin
+        for step in range(1, 9):
+            ratio = step / 8.0
+            inverse = 1.0 - ratio
+            point = (
+                inverse * inverse * origin[0] + 2 * inverse * ratio * control[0] + ratio * ratio * destination[0],
+                inverse * inverse * origin[1] + 2 * inverse * ratio * control[1] + ratio * ratio * destination[1],
+            )
+            segments.append((transform_point(matrix, previous), transform_point(matrix, point)))
+            previous = point
+        current = destination
+
+    def add_cubic(control1: Point, control2: Point, destination: Point) -> None:
+        nonlocal current
+        origin = current
+        previous = origin
+        for step in range(1, 13):
+            ratio = step / 12.0
+            inverse = 1.0 - ratio
+            point = (
+                inverse**3 * origin[0]
+                + 3 * inverse * inverse * ratio * control1[0]
+                + 3 * inverse * ratio * ratio * control2[0]
+                + ratio**3 * destination[0],
+                inverse**3 * origin[1]
+                + 3 * inverse * inverse * ratio * control1[1]
+                + 3 * inverse * ratio * ratio * control2[1]
+                + ratio**3 * destination[1],
+            )
+            segments.append((transform_point(matrix, previous), transform_point(matrix, point)))
+            previous = point
+        current = destination
+
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command = tokens[index]
+            index += 1
+        if not command:
+            raise ValueError("SVG path starts without a command")
+
+        relative = command.islower()
+        upper = command.upper()
+        if upper == "Z":
+            add_line(start, straight=False)
+            command = ""
+            continue
+        if upper == "M":
+            destination = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            index += 2
+            current = destination
+            start = destination
+            command = "l" if relative else "L"
+        elif upper == "L":
+            destination = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            index += 2
+            add_line(destination)
+        elif upper == "H":
+            x = current[0] + float(tokens[index]) if relative else float(tokens[index])
+            index += 1
+            add_line((x, current[1]))
+        elif upper == "V":
+            y = current[1] + float(tokens[index]) if relative else float(tokens[index])
+            index += 1
+            add_line((current[0], y))
+        elif upper == "Q":
+            control = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            destination = point_at(float(tokens[index + 2]), float(tokens[index + 3]), relative)
+            index += 4
+            add_quadratic(control, destination)
+            last_quadratic_control = control
+        elif upper == "T":
+            control = current if last_quadratic_control is None else (
+                2 * current[0] - last_quadratic_control[0],
+                2 * current[1] - last_quadratic_control[1],
+            )
+            destination = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            index += 2
+            add_quadratic(control, destination)
+            last_quadratic_control = control
+        elif upper == "C":
+            control1 = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            control2 = point_at(float(tokens[index + 2]), float(tokens[index + 3]), relative)
+            destination = point_at(float(tokens[index + 4]), float(tokens[index + 5]), relative)
+            index += 6
+            add_cubic(control1, control2, destination)
+            last_cubic_control = control2
+        elif upper == "S":
+            control1 = current if last_cubic_control is None else (
+                2 * current[0] - last_cubic_control[0],
+                2 * current[1] - last_cubic_control[1],
+            )
+            control2 = point_at(float(tokens[index]), float(tokens[index + 1]), relative)
+            destination = point_at(float(tokens[index + 2]), float(tokens[index + 3]), relative)
+            index += 4
+            add_cubic(control1, control2, destination)
+            last_cubic_control = control2
+        elif upper == "A":
+            destination = point_at(float(tokens[index + 5]), float(tokens[index + 6]), relative)
+            index += 7
+            add_line(destination, straight=False)
+        else:
+            raise ValueError(f"unsupported SVG path command: {command}")
+
+        if upper not in {"Q", "T"}:
+            last_quadratic_control = None
+        if upper not in {"C", "S"}:
+            last_cubic_control = None
+
+    return segments, straight_segments
+
+
+def rendered_cell_groups(svg_root: ET.Element) -> dict[str, tuple[ET.Element, Matrix]]:
+    groups: dict[str, tuple[ET.Element, Matrix]] = {}
+
+    def visit(element: ET.Element, parent_matrix: Matrix) -> None:
+        matrix = multiply_matrix(parent_matrix, parse_transform(element.get("transform")))
+        cell_id = element.get("data-cell-id")
+        if local_name(element.tag) == "g" and cell_id:
+            groups[cell_id] = (element, matrix)
+        for child in element:
+            visit(child, matrix)
+
+    visit(svg_root, IDENTITY_MATRIX)
+    return groups
+
+
+def group_graphics(group: ET.Element, group_matrix: Matrix) -> Iterator[tuple[ET.Element, Matrix]]:
+    def visit(element: ET.Element, parent_matrix: Matrix) -> Iterator[tuple[ET.Element, Matrix]]:
+        matrix = multiply_matrix(parent_matrix, parse_transform(element.get("transform")))
+        if element is not group and element.get("data-cell-id"):
+            return
+        if local_name(element.tag) in {"rect", "ellipse", "circle", "line", "polygon", "polyline", "path"}:
+            yield element, matrix
+        for child in element:
+            yield from visit(child, matrix)
+
+    for child in group:
+        yield from visit(child, group_matrix)
+
+
+def main_rendered_path(group: ET.Element, matrix: Matrix) -> tuple[list[Segment], list[Segment]] | None:
+    for element, element_matrix in group_graphics(group, matrix):
+        if (
+            local_name(element.tag) == "path"
+            and element.get("fill") == "none"
+            and element.get("pointer-events") == "stroke"
+            and element.get("d")
+        ):
+            return parse_svg_path(element.get("d", ""), element_matrix)
+    return None
+
+
+def primitive_points(element: ET.Element, matrix: Matrix) -> list[Point]:
+    tag = local_name(element.tag)
+    if tag == "path" and element.get("d"):
+        segments, _ = parse_svg_path(element.get("d", ""), matrix)
+        return [point for segment in segments for point in segment]
+    if tag == "rect":
+        x, y = number(element.get("x")), number(element.get("y"))
+        width, height = number(element.get("width")), number(element.get("height"))
+        return [transform_point(matrix, point) for point in ((x, y), (x + width, y), (x + width, y + height), (x, y + height))]
+    if tag in {"ellipse", "circle"}:
+        cx, cy = number(element.get("cx")), number(element.get("cy"))
+        rx = number(element.get("rx"), number(element.get("r")))
+        ry = number(element.get("ry"), number(element.get("r")))
+        return [
+            transform_point(matrix, (cx + rx * math.cos(index * math.pi / 16), cy + ry * math.sin(index * math.pi / 16)))
+            for index in range(32)
+        ]
+    if tag == "line":
+        return [
+            transform_point(matrix, (number(element.get("x1")), number(element.get("y1")))),
+            transform_point(matrix, (number(element.get("x2")), number(element.get("y2")))),
+        ]
+    if tag in {"polygon", "polyline"}:
+        values = [float(value) for value in re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", element.get("points", ""))]
+        return [transform_point(matrix, (values[index], values[index + 1])) for index in range(0, len(values) - 1, 2)]
+    return []
+
+
+def rendered_shape_bounds(group: ET.Element, matrix: Matrix) -> tuple[float, float, float, float] | None:
+    points: list[Point] = []
+    for element, element_matrix in group_graphics(group, matrix):
+        if element.get("pointer-events") == "all":
+            points.extend(primitive_points(element, element_matrix))
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def segment_length(segment: Segment) -> float:
+    return math.dist(segment[0], segment[1])
+
+
+def proper_intersection(first: Segment, second: Segment, epsilon: float = 1e-6) -> Point | None:
+    (px, py), (p2x, p2y) = first
+    (qx, qy), (q2x, q2y) = second
+    rx, ry = p2x - px, p2y - py
+    sx, sy = q2x - qx, q2y - qy
+    denominator = rx * sy - ry * sx
+    if abs(denominator) <= epsilon:
+        return None
+    qpx, qpy = qx - px, qy - py
+    first_ratio = (qpx * sy - qpy * sx) / denominator
+    second_ratio = (qpx * ry - qpy * rx) / denominator
+    if -epsilon <= first_ratio <= 1 + epsilon and -epsilon <= second_ratio <= 1 + epsilon:
+        return px + first_ratio * rx, py + first_ratio * ry
+    return None
+
+
+def near(point: Point, candidate: Point | None, tolerance: float = 3.0) -> bool:
+    return candidate is not None and math.dist(point, candidate) <= tolerance
+
+
+def point_inside_shape(point: Point, bounds: tuple[float, float, float, float], style: dict[str, str]) -> bool:
+    left, top, right, bottom = bounds
+    margin = 1.5
+    if not (left + margin < point[0] < right - margin and top + margin < point[1] < bottom - margin):
+        return False
+    center_x, center_y = (left + right) / 2, (top + bottom) / 2
+    radius_x, radius_y = max((right - left) / 2, 1.0), max((bottom - top) / 2, 1.0)
+    shape = style.get("shape", "").lower()
+    if "rhombus" in style or shape == "rhombus":
+        return abs(point[0] - center_x) / radius_x + abs(point[1] - center_y) / radius_y < 0.97
+    if "ellipse" in style or shape == "ellipse":
+        return ((point[0] - center_x) / radius_x) ** 2 + ((point[1] - center_y) / radius_y) ** 2 < 0.94
+    return True
+
+
+def segment_enters_shape(segment: Segment, bounds: tuple[float, float, float, float], style: dict[str, str]) -> bool:
+    length = segment_length(segment)
+    samples = max(1, math.ceil(length / 2.0))
+    for index in range(samples + 1):
+        ratio = index / samples
+        point = (
+            segment[0][0] + (segment[1][0] - segment[0][0]) * ratio,
+            segment[0][1] + (segment[1][1] - segment[0][1]) * ratio,
+        )
+        if point_inside_shape(point, bounds, style):
+            return True
+    return False
+
+
 def effective_cell_ids(model: ET.Element) -> tuple[list[tuple[ET.Element, str | None]], dict[str, ET.Element]]:
     wrapper_ids: dict[int, str] = {}
     for wrapper in model.iter():
@@ -110,6 +464,81 @@ def number(value: str | None, default: float = 0.0) -> float:
 
 def geometry(cell: ET.Element) -> ET.Element | None:
     return direct_child(cell, "mxGeometry")
+
+
+def has_visible_value(cell: ET.Element) -> bool:
+    value = html.unescape(cell.get("value", "")).replace("\xa0", " ")
+    return bool(re.sub(r"<[^>]*>", "", value).strip())
+
+
+def blank_sibling_under_text(
+    text_cell: ET.Element,
+    parent_id: str,
+    cells: list[tuple[ET.Element, str | None]],
+) -> str | None:
+    text_geometry = geometry(text_cell)
+    if text_geometry is None or text_geometry.get("relative") == "1":
+        return None
+
+    try:
+        text_x = number(text_geometry.get("x"))
+        text_y = number(text_geometry.get("y"))
+        text_width = number(text_geometry.get("width"))
+        text_height = number(text_geometry.get("height"))
+    except ValueError:
+        return None
+
+    text_area = text_width * text_height
+    if text_area <= 0:
+        return None
+
+    for candidate, candidate_id in cells:
+        if (
+            not candidate_id
+            or candidate is text_cell
+            or candidate.get("vertex") != "1"
+            or candidate.get("parent") != parent_id
+            or has_visible_value(candidate)
+        ):
+            continue
+
+        candidate_style = parse_style(candidate.get("style", ""))
+        if (
+            "text" in candidate_style
+            or "group" in candidate_style
+            or "swimlane" in candidate_style
+            or candidate_style.get("container") == "1"
+            or candidate_style.get("pointerevents") == "0"
+            or candidate_style.get("connectable") == "0"
+        ):
+            continue
+
+        candidate_geometry = geometry(candidate)
+        if candidate_geometry is None or candidate_geometry.get("relative") == "1":
+            continue
+
+        try:
+            candidate_x = number(candidate_geometry.get("x"))
+            candidate_y = number(candidate_geometry.get("y"))
+            candidate_width = number(candidate_geometry.get("width"))
+            candidate_height = number(candidate_geometry.get("height"))
+        except ValueError:
+            continue
+
+        intersection_width = max(
+            0.0,
+            min(text_x + text_width, candidate_x + candidate_width)
+            - max(text_x, candidate_x),
+        )
+        intersection_height = max(
+            0.0,
+            min(text_y + text_height, candidate_y + candidate_height)
+            - max(text_y, candidate_y),
+        )
+        if intersection_width * intersection_height >= text_area * 0.8:
+            return candidate_id
+
+    return None
 
 
 def validate_model(page: str, model: ET.Element) -> list[Issue]:
@@ -158,6 +587,41 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                 )
 
         style = parse_style(cell.get("style", ""))
+        is_large_background_container = False
+        if (
+            cell.get("vertex") == "1"
+            and not has_visible_value(cell)
+            and style.get("rounded") == "1"
+            and (style.get("pointerevents") == "0" or style.get("container") == "1")
+        ):
+            cell_geometry = geometry(cell)
+            if cell_geometry is not None and cell_geometry.get("relative") != "1":
+                try:
+                    width = number(cell_geometry.get("width"))
+                    height = number(cell_geometry.get("height"))
+                    is_large_background_container = width >= 300.0 and height >= 300.0
+                except ValueError:
+                    pass
+
+        if is_large_background_container:
+            try:
+                arc_size = number(style.get("arcsize"), 10.0)
+            except ValueError:
+                arc_size = 10.0
+            if arc_size > 4.0:
+                issues.append(
+                    Issue(
+                        "error",
+                        "OUTER_CONTAINER_CORNER_RADIUS",
+                        page,
+                        (
+                            f"large background container arcSize is {arc_size:g}; "
+                            "use rounded=0 or set an explicit arcSize no greater than 4"
+                        ),
+                        cell_id,
+                    )
+                )
+
         is_text_box = cell.get("vertex") == "1" and "text" in style
         if not is_text_box:
             continue
@@ -180,6 +644,23 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
         if text_geometry is None:
             issues.append(Issue("error", "TEXT_GEOMETRY", page, "text box has no geometry", cell_id))
             continue
+
+        if owner is not None and owner.get("vertex") == "1" and parent_id:
+            sibling_id = blank_sibling_under_text(cell, parent_id, cells)
+            if sibling_id:
+                issues.append(
+                    Issue(
+                        "error",
+                        "TEXT_SIBLING_OVERLAY",
+                        page,
+                        (
+                            f"text overlaps blank sibling shape {sibling_id}; use the shape value "
+                            "or make the text a child of that shape"
+                        ),
+                        cell_id,
+                    )
+                )
+                continue
 
         if owner is None or owner.get("vertex") != "1":
             issues.append(
@@ -258,6 +739,220 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
     return issues
 
 
+def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) -> list[Issue]:
+    issues: list[Issue] = []
+    cells, by_id = effective_cell_ids(model)
+    groups = rendered_cell_groups(svg_root)
+    edges: list[RenderedEdge] = []
+
+    for cell, cell_id in cells:
+        if not cell_id or cell.get("edge") != "1" or cell_id not in groups:
+            continue
+        group, matrix = groups[cell_id]
+        try:
+            rendered_path = main_rendered_path(group, matrix)
+        except (IndexError, ValueError) as exc:
+            issues.append(
+                Issue("warning", "EDGE_RENDER_PARSE", page, f"cannot parse rendered edge path: {exc}", cell_id)
+            )
+            continue
+        if rendered_path is None:
+            continue
+        segments, straight_segments = rendered_path
+        style = parse_style(cell.get("style", ""))
+        edge = RenderedEdge(
+            cell_id=cell_id,
+            source=cell.get("source"),
+            target=cell.get("target"),
+            style=style,
+            segments=segments,
+            straight_segments=straight_segments,
+        )
+        edges.append(edge)
+
+        jump_style = style.get("jumpstyle", "").lower()
+        if jump_style and jump_style not in {"none", "0"}:
+            issues.append(
+                Issue(
+                    "warning",
+                    "EDGE_JUMP_STYLE_REVIEW",
+                    page,
+                    f"jumpStyle={jump_style} needs proof that the crossing cannot be routed away",
+                    cell_id,
+                )
+            )
+
+        if style.get("edgestyle", "").lower() != "orthogonaledgestyle" or not straight_segments:
+            continue
+        lengths = [segment_length(segment) for segment in straight_segments]
+        if len(lengths) == 1:
+            if lengths[0] < 24.0 - 0.01:
+                issues.append(
+                    Issue(
+                        "warning",
+                        "EDGE_SHORT_DIRECT",
+                        page,
+                        f"single straight segment is {lengths[0]:.1f}px; expected at least 24px",
+                        cell_id,
+                    )
+                )
+            continue
+        if lengths[0] < 16.0 - 0.01:
+            issues.append(
+                Issue(
+                    "warning",
+                    "EDGE_SHORT_START",
+                    page,
+                    f"first straight segment is {lengths[0]:.1f}px; expected at least 16px",
+                    cell_id,
+                )
+            )
+        short_middle = [length for length in lengths[1:-1] if length < 16.0 - 0.01]
+        if short_middle:
+            issues.append(
+                Issue(
+                    "warning",
+                    "EDGE_SHORT_MIDDLE",
+                    page,
+                    f"middle straight segment is as short as {min(short_middle):.1f}px; expected at least 16px",
+                    cell_id,
+                )
+            )
+        if lengths[-1] < 24.0 - 0.01:
+            issues.append(
+                Issue(
+                    "warning",
+                    "EDGE_SHORT_END",
+                    page,
+                    f"last straight segment is {lengths[-1]:.1f}px; expected at least 24px",
+                    cell_id,
+                )
+            )
+
+    for index, first in enumerate(edges):
+        for second in edges[index + 1 :]:
+            crossing: Point | None = None
+            for first_segment in first.segments:
+                for second_segment in second.segments:
+                    candidate = proper_intersection(first_segment, second_segment)
+                    if candidate is None:
+                        continue
+                    shared_endpoint = bool(
+                        {first.source, first.target}.difference({None})
+                        & {second.source, second.target}.difference({None})
+                    )
+                    if shared_endpoint and (
+                        (near(candidate, first.start) or near(candidate, first.end))
+                        and (near(candidate, second.start) or near(candidate, second.end))
+                    ):
+                        continue
+                    crossing = candidate
+                    break
+                if crossing is not None:
+                    break
+            if crossing is not None:
+                issues.append(
+                    Issue(
+                        "error",
+                        "EDGE_CROSSING",
+                        page,
+                        f"crosses {second.cell_id} near ({crossing[0]:.1f}, {crossing[1]:.1f})",
+                        first.cell_id,
+                    )
+                )
+
+    child_cells: dict[str, list[ET.Element]] = {}
+    for cell, _ in cells:
+        if cell.get("parent"):
+            child_cells.setdefault(cell.get("parent", ""), []).append(cell)
+
+    rendered_shapes: dict[str, tuple[tuple[float, float, float, float], dict[str, str]]] = {}
+    for cell, cell_id in cells:
+        if not cell_id or cell.get("vertex") != "1" or cell_id not in groups:
+            continue
+        style = parse_style(cell.get("style", ""))
+        if (
+            "text" in style
+            or "group" in style
+            or "swimlane" in style
+            or style.get("container") == "1"
+            or style.get("pointerevents") == "0"
+            or style.get("connectable") == "0"
+        ):
+            continue
+        structural_children = any(
+            child.get("edge") == "1"
+            or (child.get("vertex") == "1" and "text" not in parse_style(child.get("style", "")))
+            for child in child_cells.get(cell_id, [])
+        )
+        if structural_children:
+            continue
+        group, matrix = groups[cell_id]
+        try:
+            bounds = rendered_shape_bounds(group, matrix)
+        except (IndexError, ValueError):
+            bounds = None
+        if bounds is not None:
+            rendered_shapes[cell_id] = (bounds, style)
+
+    for edge in edges:
+        endpoints = {edge.source, edge.target}
+        for shape_id, (bounds, style) in rendered_shapes.items():
+            if shape_id in endpoints:
+                continue
+            if any(segment_enters_shape(segment, bounds, style) for segment in edge.segments):
+                issues.append(
+                    Issue(
+                        "error",
+                        "EDGE_THROUGH_SHAPE",
+                        page,
+                        f"rendered path enters non-endpoint shape {shape_id}",
+                        edge.cell_id,
+                    )
+                )
+
+    return issues
+
+
+def resolve_drawio_cli(explicit: Path | None) -> Path:
+    if explicit is not None:
+        candidates = [explicit.expanduser()]
+    else:
+        candidates = [Path("/Applications/draw.io.app/Contents/MacOS/draw.io")]
+        discovered = shutil.which("drawio")
+        if discovered:
+            candidates.append(Path(discovered))
+    for candidate in candidates:
+        if candidate.is_file() and candidate.stat().st_mode & 0o111:
+            return candidate
+    requested = f" at {explicit}" if explicit is not None else ""
+    raise FileNotFoundError(f"Draw.io Desktop CLI not found{requested}")
+
+
+def export_svg_page(drawio_cli: Path, drawio_file: Path, page_index: int, output: Path) -> None:
+    command = [
+        str(drawio_cli),
+        "-x",
+        "-f",
+        "svg",
+        "--page-index",
+        str(page_index),
+        "--embed-svg-fonts",
+        "false",
+        "--theme",
+        "light",
+        "-b",
+        "0",
+        "-o",
+        str(output),
+        str(drawio_file),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output.is_file():
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit status {completed.returncode}"
+        raise RuntimeError(f"page {page_index} SVG export failed: {detail}")
+
+
 def format_issue(issue: Issue) -> str:
     location = f" [{issue.page}]"
     if issue.cell:
@@ -267,10 +962,20 @@ def format_issue(issue: Issue) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Validate Draw.io XML structure and independent text-box boundaries."
+        description="Validate Draw.io XML structure, text boxes, and optional rendered edge geometry."
     )
     parser.add_argument("drawio_file", type=Path)
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument(
+        "--check-rendered-edges",
+        action="store_true",
+        help="Export temporary SVG pages and check crossings, shape intersections, and short edge segments.",
+    )
+    parser.add_argument(
+        "--drawio-cli",
+        type=Path,
+        help="Draw.io Desktop CLI path; defaults to the standard macOS path or command lookup.",
+    )
     parser.add_argument(
         "--strict-warnings",
         action="store_true",
@@ -294,6 +999,23 @@ def main(argv: Iterable[str] | None = None) -> int:
     for page, model in models:
         issues.extend(validate_model(page, model))
 
+    if args.check_rendered_edges and not any(issue.severity == "error" for issue in issues):
+        try:
+            drawio_cli = resolve_drawio_cli(args.drawio_cli)
+            with tempfile.TemporaryDirectory(prefix="drawio-rendered-edge-check-") as temporary:
+                temporary_path = Path(temporary)
+                for page_index, (page, model) in enumerate(models, start=1):
+                    svg_path = temporary_path / f"page-{page_index}.svg"
+                    export_svg_page(drawio_cli, args.drawio_file, page_index, svg_path)
+                    svg_root = ET.parse(svg_path).getroot()
+                    issues.extend(validate_rendered_svg(page, model, svg_root))
+        except (FileNotFoundError, OSError, RuntimeError, ET.ParseError) as exc:
+            if args.as_json:
+                print(json.dumps({"file": str(args.drawio_file), "fatal": str(exc)}, ensure_ascii=False))
+            else:
+                print(f"FATAL: {exc}", file=sys.stderr)
+            return 2
+
     errors = sum(issue.severity == "error" for issue in issues)
     warnings = sum(issue.severity == "warning" for issue in issues)
     if args.as_json:
@@ -304,6 +1026,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "pages": len(models),
                     "errors": errors,
                     "warnings": warnings,
+                    "rendered_edge_check": args.check_rendered_edges,
                     "issues": [asdict(issue) for issue in issues],
                 },
                 ensure_ascii=False,

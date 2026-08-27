@@ -1,0 +1,157 @@
+{
+  "name": "semantic-architecture-pastel-default",
+  "version": 5,
+  "source": {
+    "repository": "https://github.com/Agents365-ai/drawio-skill",
+    "preview": "https://github.com/Agents365-ai/drawio-skill/blob/main/assets/demo-star.png",
+    "editable_source": "https://github.com/Agents365-ai/drawio-skill/blob/main/assets/demo-star.drawio",
+    "license": "MIT",
+    "note": "The original low-saturation visual direction came from this editable example. Version 2 replaced the role palette and visual encoding with the local semantic architecture rules. Version 3 adds the authoritative relationship line palette, patterns, and widths. Version 4 scopes line-width decisions to the current diagram or page and defines main_path as that diagram's core reading chain. Version 5 separates large background-container corner radii from compact cards. The example layout is not a reference. This local file is authoritative during skill execution; do not fetch remote files at runtime."
+  },
+  "application": {
+    "new_diagrams": "default",
+    "existing_diagrams": "preserve unless the user explicitly asks to restyle or redraw"
+  },
+  "canvas": {
+    "background": "#FFFFFF"
+  },
+  "palette": {
+    "service": {
+      "fillColor": "#DBEAFE",
+      "strokeColor": "#2563EB",
+      "use": "core business services, ordinary modules, and first-party application components"
+    },
+    "control": {
+      "fillColor": "#EDE9FE",
+      "strokeColor": "#7C3AED",
+      "use": "schedulers, orchestrators, controllers, and control-plane components"
+    },
+    "storage": {
+      "fillColor": "#CCFBF1",
+      "strokeColor": "#0F766E",
+      "use": "databases, object storage, file systems, caches, and other persistent data stores"
+    },
+    "messaging": {
+      "fillColor": "#FEF3C7",
+      "strokeColor": "#D97706",
+      "use": "message queues, event buses, asynchronous jobs, and buffered work pools"
+    },
+    "external": {
+      "fillColor": "#F1F5F9",
+      "strokeColor": "#64748B",
+      "use": "external systems, third-party services, and neutral context"
+    },
+    "participant": {
+      "fillColor": "#F8FAFC",
+      "strokeColor": "#475569",
+      "use": "users, clients, upstream callers, terminals, and browsers"
+    },
+    "observability": {
+      "fillColor": "#CFFAFE",
+      "strokeColor": "#0E7490",
+      "use": "monitoring, logs, traces, metrics, and alerting"
+    },
+    "risk": {
+      "fillColor": "#FEE2E2",
+      "strokeColor": "#DC2626",
+      "use": "confirmed errors, risks, exceptional paths, and deprecated elements; prefer a border or badge over a large red fill"
+    }
+  },
+  "status_badges": {
+    "healthy": {
+      "fillColor": "#DCFCE7",
+      "strokeColor": "#15803D",
+      "label": "正常"
+    },
+    "warning": {
+      "fillColor": "#FEF3C7",
+      "strokeColor": "#D97706",
+      "label": "警告"
+    },
+    "error": {
+      "fillColor": "#FEE2E2",
+      "strokeColor": "#DC2626",
+      "label": "故障"
+    },
+    "planned": {
+      "fillColor": "#F8FAFC",
+      "strokeColor": "#64748B",
+      "label": "待建设",
+      "style": "dashed=1"
+    },
+    "deprecated": {
+      "fillColor": "#F1F5F9",
+      "strokeColor": "#DC2626",
+      "label": "已废弃",
+      "style": "dashed=1"
+    }
+  },
+  "visual_encoding": {
+    "shape": "resource or element type, for example rounded rectangle for a service, cylinder for storage, and rhombus for a decision",
+    "fillColor": "stable functional category only",
+    "boundary": "ownership, system scope, environment, cluster, account, namespace, or another real containment boundary",
+    "lineStyle": "relationship type: solid for synchronous calls, dashed for asynchronous messages, and dotted for observability or state feedback; line color expresses normal, supporting, exceptional, or explicitly highlighted observability priority, never the endpoint category",
+    "status": "border or compact text badge; never replace the node category or rely on color alone",
+    "emphasis": "use stroke width, font weight, or one explicit focus marker; do not repurpose a category color",
+    "line_width": "relationship emphasis is scoped to one diagram or page; main_path means the core reading chain of the current diagram or page"
+  },
+  "diagram_modes": {
+    "category": "Default for architecture diagrams. Use fill colors for functional categories and status only as a labelled badge or border.",
+    "status": "For health or operational status diagrams, use neutral or restrained category fills and reserve green, amber, and red for labelled status badges or borders. Do not use amber messaging fill where it could be mistaken for a warning."
+  },
+  "vertices": {
+    "common_style": "whiteSpace=wrap;html=1;strokeWidth=1;shadow=0;glass=0;sketch=0",
+    "service_shape": "rounded=1",
+    "control_shape": "rounded=1",
+    "storage_shape": "shape=cylinder3",
+    "decision_shape": "rhombus",
+    "external_shape": "rounded=1;dashed=1",
+    "container_shape": "swimlane;startSize=30",
+    "corner_radius": {
+      "compact_card_arc_size": "10-14",
+      "large_background_container_arc_size": 4,
+      "large_background_container_max_arc_size": 4,
+      "large_background_container_definition": "blank non-connectable background with pointerEvents=0 or container=1 and both width and height at least 300 px",
+      "rule": "Do not reuse compact-card arcSize values on large background containers; use rounded=0 or rounded=1 with an explicit arcSize no greater than 4."
+    },
+    "baseline_node_size": {
+      "width": 160,
+      "height": 60,
+      "note": "Use as a visual baseline, not a fixed size. Expand for content and final display size."
+    }
+  },
+  "font": {
+    "latin_font_family": "Helvetica",
+    "chinese_font_family": "PingFang SC",
+    "ordinary_size": 12,
+    "title_or_focus_size": 14,
+    "focus_bold": true,
+    "color": "#0F172A"
+  },
+  "edges": {
+    "scope": "per_diagram_or_page",
+    "main_path_definition": "the current diagram or page's core reading chain that is necessary to answer its primary question",
+    "style": "edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#334155;strokeWidth=1.5;endArrow=classic;endFill=1",
+    "label_size": 12,
+    "label_color": "#0F172A",
+    "relationship_styles": {
+      "synchronous": "strokeColor=#334155;strokeWidth=1.5;dashed=0",
+      "main_path": "strokeColor=#334155;strokeWidth=2;inherit the solid, dashed, or dotted relationship pattern",
+      "asynchronous": "strokeColor=#334155;strokeWidth=1.5;dashed=1;dashPattern=6 4",
+      "observability_or_state_feedback": "strokeColor=#64748B;strokeWidth=1.5;dashed=1;dashPattern=1 4",
+      "supporting_dependency": "strokeColor=#64748B;strokeWidth=1-1.5;inherit the solid or dashed relationship pattern",
+      "error_failure_or_timeout": "strokeColor=#DC2626;strokeWidth=1.5;inherit the solid or dashed relationship pattern and add an explicit label",
+      "highlighted_observability": "strokeColor=#0E7490;strokeWidth=1.5;dashed=1;dashPattern=1 4"
+    },
+    "line_color_policy": "Do not color a relationship from its source or target category. Use #334155 for normal and main relationships, #64748B for supporting or state-feedback relationships, #DC2626 for labelled exceptional relationships, and #0E7490 only when an observability relationship needs explicit emphasis.",
+    "accessibility": "Meaningful lines must reach at least 3:1 contrast against the canvas. On white, do not use #94A3B8 for required relationships; the approved line colors all exceed 3:1.",
+    "routing": "Prefer direct vertical or horizontal entry. Keep bend count low and distribute multiple entry points on the target border. Limit visual line patterns to solid, dashed, and dotted. Use only semantic relationship categories that occur in the diagram, and add a legend when more than three categories are present."
+  },
+  "composition": {
+    "background": "plain white",
+    "alignment": "balanced and centered around the main reading path",
+    "whitespace": "generous enough to separate nodes and labels without creating decorative empty areas",
+    "effects": "no shadows, gradients, textures, sketch effects, or decorative icons by default",
+    "color_limit": "Use only role colors that carry meaning. Prefer service blue plus the categories required by the diagram, normally no more than five to seven semantic colors including status colors."
+  }
+}
