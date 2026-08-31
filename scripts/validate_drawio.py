@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import html
 import json
 import math
@@ -17,9 +18,58 @@ import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
+
+
+SUPPORTED_FIXES_BY_CODE: dict[str, tuple[str, ...]] = {
+    "MISSING_ID": ("assign_unique_cell_id",),
+    "DUPLICATE_ID": ("rename_duplicate_cell_id",),
+    "MISSING_PARENT": ("set_existing_parent",),
+    "EDGE_MISSING_ENDPOINT": ("set_source_and_target",),
+    "EDGE_SOURCE_NOT_FOUND": ("set_existing_source",),
+    "EDGE_TARGET_NOT_FOUND": ("set_existing_target",),
+    "EDGE_GEOMETRY": ("add_relative_edge_geometry",),
+    "OUTER_CONTAINER_CORNER_RADIUS": (
+        "set_arc_size_at_most_4",
+        "disable_container_rounding",
+    ),
+    "TEXT_CONNECTABLE": ("set_connectable_0",),
+    "TEXT_GEOMETRY": ("add_text_geometry",),
+    "TEXT_SIBLING_OVERLAY": (
+        "move_text_under_shape",
+        "use_shape_value",
+    ),
+    "TEXT_BOUNDARY_UNCHECKED": ("inspect_preview",),
+    "OWNER_GEOMETRY": ("add_owner_geometry",),
+    "TEXT_RELATIVE_GEOMETRY": (
+        "use_absolute_text_geometry",
+        "inspect_preview",
+    ),
+    "INVALID_GEOMETRY": ("replace_with_numeric_geometry",),
+    "TEXT_SAFE_BOUNDARY": (
+        "move_or_resize_text_within_safe_bounds",
+        "expand_owner_or_use_shape_value",
+    ),
+    "EDGE_RENDER_PARSE": ("inspect_exported_edge",),
+    "EDGE_JUMP_STYLE_REVIEW": (
+        "remove_jump_style",
+        "record_manual_crossing_review",
+    ),
+    "EDGE_SHORT_DIRECT": ("increase_endpoint_clearance",),
+    "EDGE_SHORT_START": ("realign_source_or_adjust_route",),
+    "EDGE_SHORT_MIDDLE": ("remove_short_dogleg_or_adjust_route",),
+    "EDGE_SHORT_END": ("realign_target_or_adjust_route",),
+    "EDGE_CROSSING": (
+        "move_endpoint_or_adjust_route",
+        "reposition_node",
+    ),
+    "EDGE_THROUGH_SHAPE": (
+        "move_endpoint_or_adjust_route",
+        "reposition_obstacle",
+    ),
+}
 
 
 @dataclass
@@ -29,6 +79,30 @@ class Issue:
     page: str
     message: str
     cell: str | None = None
+    subject: str | None = None
+    evidence: dict[str, object] = field(default_factory=dict)
+    supported_fixes: tuple[str, ...] = ()
+    fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        if self.subject is None:
+            self.subject = f"cell:{self.cell}" if self.cell else f"page:{self.page}"
+        if not self.supported_fixes:
+            self.supported_fixes = SUPPORTED_FIXES_BY_CODE.get(self.code, ())
+        if not self.fingerprint:
+            observation = json.dumps(
+                {
+                    "code": self.code,
+                    "severity": self.severity,
+                    "page": self.page,
+                    "subject": self.subject,
+                    "evidence": self.evidence,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            self.fingerprint = f"diag-{hashlib.sha256(observation.encode('utf-8')).hexdigest()[:16]}"
 
 
 Point = tuple[float, float]
@@ -546,12 +620,30 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
     cells, by_id = effective_cell_ids(model)
     seen: set[str] = set()
 
-    for cell, cell_id in cells:
+    for cell_index, (cell, cell_id) in enumerate(cells):
         if not cell_id:
-            issues.append(Issue("error", "MISSING_ID", page, "mxCell has no id"))
+            issues.append(
+                Issue(
+                    "error",
+                    "MISSING_ID",
+                    page,
+                    "mxCell has no id",
+                    subject=f"cell-index:{cell_index}",
+                    evidence={"cell_index": cell_index, "element": "mxCell"},
+                )
+            )
             continue
         if cell_id in seen:
-            issues.append(Issue("error", "DUPLICATE_ID", page, f"duplicate id: {cell_id}", cell_id))
+            issues.append(
+                Issue(
+                    "error",
+                    "DUPLICATE_ID",
+                    page,
+                    f"duplicate id: {cell_id}",
+                    cell_id,
+                    evidence={"duplicate_id": cell_id},
+                )
+            )
         seen.add(cell_id)
 
     for cell, cell_id in cells:
@@ -561,7 +653,14 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
         parent_id = cell.get("parent")
         if parent_id and parent_id not in by_id:
             issues.append(
-                Issue("error", "MISSING_PARENT", page, f"parent does not exist: {parent_id}", cell_id)
+                Issue(
+                    "error",
+                    "MISSING_PARENT",
+                    page,
+                    f"parent does not exist: {parent_id}",
+                    cell_id,
+                    evidence={"missing_parent": parent_id},
+                )
             )
 
         if cell.get("edge") == "1":
@@ -569,21 +668,54 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
             target = cell.get("target")
             if not source or not target:
                 issues.append(
-                    Issue("error", "EDGE_MISSING_ENDPOINT", page, "edge needs source and target", cell_id)
+                    Issue(
+                        "error",
+                        "EDGE_MISSING_ENDPOINT",
+                        page,
+                        "edge needs source and target",
+                        cell_id,
+                        evidence={"source": source, "target": target},
+                    )
                 )
             else:
                 if source not in by_id:
                     issues.append(
-                        Issue("error", "EDGE_SOURCE_NOT_FOUND", page, f"source does not exist: {source}", cell_id)
+                        Issue(
+                            "error",
+                            "EDGE_SOURCE_NOT_FOUND",
+                            page,
+                            f"source does not exist: {source}",
+                            cell_id,
+                            evidence={"missing_source": source},
+                        )
                     )
                 if target not in by_id:
                     issues.append(
-                        Issue("error", "EDGE_TARGET_NOT_FOUND", page, f"target does not exist: {target}", cell_id)
+                        Issue(
+                            "error",
+                            "EDGE_TARGET_NOT_FOUND",
+                            page,
+                            f"target does not exist: {target}",
+                            cell_id,
+                            evidence={"missing_target": target},
+                        )
                     )
             edge_geometry = geometry(cell)
             if edge_geometry is None or edge_geometry.get("relative") != "1":
                 issues.append(
-                    Issue("error", "EDGE_GEOMETRY", page, "edge needs relative mxGeometry", cell_id)
+                    Issue(
+                        "error",
+                        "EDGE_GEOMETRY",
+                        page,
+                        "edge needs relative mxGeometry",
+                        cell_id,
+                        evidence={
+                            "geometry_present": edge_geometry is not None,
+                            "relative": edge_geometry.get("relative")
+                            if edge_geometry is not None
+                            else None,
+                        },
+                    )
                 )
 
         style = parse_style(cell.get("style", ""))
@@ -619,6 +751,12 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                             "use rounded=0 or set an explicit arcSize no greater than 4"
                         ),
                         cell_id,
+                        evidence={
+                            "arc_size": arc_size,
+                            "maximum_arc_size": 4.0,
+                            "width": width,
+                            "height": height,
+                        },
                     )
                 )
 
@@ -637,12 +775,31 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
 
         if style.get("connectable") != "0" and cell.get("connectable") != "0":
             issues.append(
-                Issue("error", "TEXT_CONNECTABLE", page, "independent text box needs connectable=0", cell_id)
+                Issue(
+                    "error",
+                    "TEXT_CONNECTABLE",
+                    page,
+                    "independent text box needs connectable=0",
+                    cell_id,
+                    evidence={
+                        "style_connectable": style.get("connectable"),
+                        "attribute_connectable": cell.get("connectable"),
+                    },
+                )
             )
 
         text_geometry = geometry(cell)
         if text_geometry is None:
-            issues.append(Issue("error", "TEXT_GEOMETRY", page, "text box has no geometry", cell_id))
+            issues.append(
+                Issue(
+                    "error",
+                    "TEXT_GEOMETRY",
+                    page,
+                    "text box has no geometry",
+                    cell_id,
+                    evidence={"parent": parent_id, "geometry_present": False},
+                )
+            )
             continue
 
         if owner is not None and owner.get("vertex") == "1" and parent_id:
@@ -658,6 +815,7 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                             "or make the text a child of that shape"
                         ),
                         cell_id,
+                        evidence={"overlapped_sibling": sibling_id},
                     )
                 )
                 continue
@@ -670,6 +828,13 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                     page,
                     "top-level text has no owning shape; verify its placement in the preview",
                     cell_id,
+                    evidence={
+                        "parent": parent_id,
+                        "owner_present": owner is not None,
+                        "owner_is_vertex": owner.get("vertex") == "1"
+                        if owner is not None
+                        else False,
+                    },
                 )
             )
             continue
@@ -677,7 +842,14 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
         owner_geometry = geometry(owner)
         if owner_geometry is None:
             issues.append(
-                Issue("warning", "OWNER_GEOMETRY", page, "owning shape has no geometry", cell_id)
+                Issue(
+                    "warning",
+                    "OWNER_GEOMETRY",
+                    page,
+                    "owning shape has no geometry",
+                    cell_id,
+                    evidence={"owner": parent_id, "geometry_present": False},
+                )
             )
             continue
 
@@ -689,6 +861,7 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                     page,
                     "relative text geometry cannot be checked with pixel safe bounds",
                     cell_id,
+                    evidence={"owner": parent_id, "relative": text_geometry.get("relative")},
                 )
             )
             continue
@@ -702,7 +875,18 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
             text_height = number(text_geometry.get("height"))
         except ValueError as exc:
             issues.append(
-                Issue("error", "INVALID_GEOMETRY", page, f"geometry is not numeric: {exc}", cell_id)
+                Issue(
+                    "error",
+                    "INVALID_GEOMETRY",
+                    page,
+                    f"geometry is not numeric: {exc}",
+                    cell_id,
+                    evidence={
+                        "owner": parent_id,
+                        "owner_geometry": dict(owner_geometry.attrib),
+                        "text_geometry": dict(text_geometry.attrib),
+                    },
+                )
             )
             continue
 
@@ -733,6 +917,21 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
                     page,
                     f"text box exceeds safe bounds; expected {expected}; actual {actual}",
                     cell_id,
+                    evidence={
+                        "owner": parent_id,
+                        "safe_bounds": {
+                            "left": safe_x,
+                            "right": owner_width - safe_x,
+                            "top": safe_y,
+                            "bottom": owner_height - safe_y,
+                        },
+                        "actual_bounds": {
+                            "left": text_x,
+                            "right": text_x + text_width,
+                            "top": text_y,
+                            "bottom": text_y + text_height,
+                        },
+                    },
                 )
             )
 
@@ -741,7 +940,7 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
 
 def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) -> list[Issue]:
     issues: list[Issue] = []
-    cells, by_id = effective_cell_ids(model)
+    cells, _ = effective_cell_ids(model)
     groups = rendered_cell_groups(svg_root)
     edges: list[RenderedEdge] = []
 
@@ -753,7 +952,14 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
             rendered_path = main_rendered_path(group, matrix)
         except (IndexError, ValueError) as exc:
             issues.append(
-                Issue("warning", "EDGE_RENDER_PARSE", page, f"cannot parse rendered edge path: {exc}", cell_id)
+                Issue(
+                    "warning",
+                    "EDGE_RENDER_PARSE",
+                    page,
+                    f"cannot parse rendered edge path: {exc}",
+                    cell_id,
+                    evidence={"exception": type(exc).__name__, "reason": str(exc)},
+                )
             )
             continue
         if rendered_path is None:
@@ -779,6 +985,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                     page,
                     f"jumpStyle={jump_style} needs proof that the crossing cannot be routed away",
                     cell_id,
+                    evidence={"jump_style": jump_style},
                 )
             )
 
@@ -794,6 +1001,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                         page,
                         f"single straight segment is {lengths[0]:.1f}px; expected at least 24px",
                         cell_id,
+                        evidence={"actual_px": lengths[0], "minimum_px": 24.0},
                     )
                 )
             continue
@@ -805,6 +1013,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                     page,
                     f"first straight segment is {lengths[0]:.1f}px; expected at least 16px",
                     cell_id,
+                    evidence={"actual_px": lengths[0], "minimum_px": 16.0},
                 )
             )
         short_middle = [length for length in lengths[1:-1] if length < 16.0 - 0.01]
@@ -816,6 +1025,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                     page,
                     f"middle straight segment is as short as {min(short_middle):.1f}px; expected at least 16px",
                     cell_id,
+                    evidence={"actual_px": min(short_middle), "minimum_px": 16.0},
                 )
             )
         if lengths[-1] < 24.0 - 0.01:
@@ -826,6 +1036,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                     page,
                     f"last straight segment is {lengths[-1]:.1f}px; expected at least 24px",
                     cell_id,
+                    evidence={"actual_px": lengths[-1], "minimum_px": 24.0},
                 )
             )
 
@@ -858,6 +1069,10 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                         page,
                         f"crosses {second.cell_id} near ({crossing[0]:.1f}, {crossing[1]:.1f})",
                         first.cell_id,
+                        evidence={
+                            "other_edge": second.cell_id,
+                            "intersection": {"x": crossing[0], "y": crossing[1]},
+                        },
                     )
                 )
 
@@ -908,6 +1123,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                         page,
                         f"rendered path enters non-endpoint shape {shape_id}",
                         edge.cell_id,
+                        evidence={"non_endpoint_shape": shape_id},
                     )
                 )
 
@@ -953,6 +1169,31 @@ def export_svg_page(drawio_cli: Path, drawio_file: Path, page_index: int, output
         raise RuntimeError(f"page {page_index} SVG export failed: {detail}")
 
 
+def validate_file(
+    drawio_file: Path,
+    *,
+    check_rendered_edges: bool = False,
+    drawio_cli: Path | None = None,
+) -> tuple[int, list[Issue]]:
+    """Validate one exact Draw.io file and return its page count and diagnostics."""
+    models = load_models(drawio_file)
+    issues: list[Issue] = []
+    for page, model in models:
+        issues.extend(validate_model(page, model))
+
+    if check_rendered_edges and not any(issue.severity == "error" for issue in issues):
+        resolved_cli = resolve_drawio_cli(drawio_cli)
+        with tempfile.TemporaryDirectory(prefix="drawio-rendered-edge-check-") as temporary:
+            temporary_path = Path(temporary)
+            for page_index, (page, model) in enumerate(models, start=1):
+                svg_path = temporary_path / f"page-{page_index}.svg"
+                export_svg_page(resolved_cli, drawio_file, page_index, svg_path)
+                svg_root = ET.parse(svg_path).getroot()
+                issues.extend(validate_rendered_svg(page, model, svg_root))
+
+    return len(models), issues
+
+
 def format_issue(issue: Issue) -> str:
     location = f" [{issue.page}]"
     if issue.cell:
@@ -987,34 +1228,33 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        models = load_models(args.drawio_file)
-    except (OSError, ET.ParseError, ValueError, binascii.Error, zlib.error) as exc:
+        pages, issues = validate_file(
+            args.drawio_file,
+            check_rendered_edges=args.check_rendered_edges,
+            drawio_cli=args.drawio_cli,
+        )
+    except (
+        OSError,
+        ET.ParseError,
+        ValueError,
+        binascii.Error,
+        zlib.error,
+        RuntimeError,
+    ) as exc:
         if args.as_json:
-            print(json.dumps({"file": str(args.drawio_file), "fatal": str(exc)}, ensure_ascii=False))
+            print(
+                json.dumps(
+                    {
+                        "diagnostic_schema_version": 3,
+                        "file": str(args.drawio_file),
+                        "fatal": str(exc),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(f"FATAL: {exc}", file=sys.stderr)
         return 2
-
-    issues: list[Issue] = []
-    for page, model in models:
-        issues.extend(validate_model(page, model))
-
-    if args.check_rendered_edges and not any(issue.severity == "error" for issue in issues):
-        try:
-            drawio_cli = resolve_drawio_cli(args.drawio_cli)
-            with tempfile.TemporaryDirectory(prefix="drawio-rendered-edge-check-") as temporary:
-                temporary_path = Path(temporary)
-                for page_index, (page, model) in enumerate(models, start=1):
-                    svg_path = temporary_path / f"page-{page_index}.svg"
-                    export_svg_page(drawio_cli, args.drawio_file, page_index, svg_path)
-                    svg_root = ET.parse(svg_path).getroot()
-                    issues.extend(validate_rendered_svg(page, model, svg_root))
-        except (FileNotFoundError, OSError, RuntimeError, ET.ParseError) as exc:
-            if args.as_json:
-                print(json.dumps({"file": str(args.drawio_file), "fatal": str(exc)}, ensure_ascii=False))
-            else:
-                print(f"FATAL: {exc}", file=sys.stderr)
-            return 2
 
     errors = sum(issue.severity == "error" for issue in issues)
     warnings = sum(issue.severity == "warning" for issue in issues)
@@ -1022,8 +1262,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(
             json.dumps(
                 {
+                    "diagnostic_schema_version": 3,
                     "file": str(args.drawio_file),
-                    "pages": len(models),
+                    "pages": pages,
                     "errors": errors,
                     "warnings": warnings,
                     "rendered_edge_check": args.check_rendered_edges,
@@ -1037,9 +1278,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         for issue in issues:
             print(format_issue(issue))
         if not issues:
-            print(f"OK: {args.drawio_file} ({len(models)} page(s))")
+            print(f"OK: {args.drawio_file} ({pages} page(s))")
         else:
-            print(f"SUMMARY: {errors} error(s), {warnings} warning(s), {len(models)} page(s)")
+            print(f"SUMMARY: {errors} error(s), {warnings} warning(s), {pages} page(s)")
 
     if errors or (warnings and args.strict_warnings):
         return 1

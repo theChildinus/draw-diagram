@@ -3,9 +3,14 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 import xml.etree.ElementTree as ET
+from dataclasses import asdict
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from validate_drawio import resolve_drawio_cli, validate_model, validate_rendered_svg
 
@@ -120,6 +125,19 @@ class OuterContainerCornerRadiusTest(unittest.TestCase):
 
         self.assertIn("OUTER_CONTAINER_CORNER_RADIUS", {issue.code for issue in issues})
 
+    def test_diagnostic_exposes_subject_evidence_and_supported_fixes(self) -> None:
+        issues = validate_model("Page-1", model_with_background_container(12))
+        issue = next(
+            issue for issue in issues if issue.code == "OUTER_CONTAINER_CORNER_RADIUS"
+        )
+        payload = asdict(issue)
+
+        self.assertEqual("cell:region-bg", payload["subject"])
+        self.assertRegex(payload["fingerprint"], r"^diag-[0-9a-f]{16}$")
+        self.assertEqual(12.0, payload["evidence"]["arc_size"])
+        self.assertEqual(4.0, payload["evidence"]["maximum_arc_size"])
+        self.assertIn("set_arc_size_at_most_4", payload["supported_fixes"])
+
     def test_accepts_large_background_with_small_corner_radius(self) -> None:
         issues = validate_model("Page-1", model_with_background_container(4))
 
@@ -203,6 +221,11 @@ class RenderedEdgeTest(unittest.TestCase):
 
         self.assertIn("EDGE_SHORT_START", codes)
         self.assertIn("EDGE_SHORT_END", codes)
+
+        short_end = next(issue for issue in issues if issue.code == "EDGE_SHORT_END")
+        self.assertEqual(20.0, short_end.evidence["actual_px"])
+        self.assertEqual(24.0, short_end.evidence["minimum_px"])
+        self.assertIn("realign_target_or_adjust_route", short_end.supported_fixes)
 
     def test_flags_jump_style_for_manual_review(self) -> None:
         model = rendered_model(

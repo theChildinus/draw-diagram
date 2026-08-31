@@ -18,7 +18,7 @@
 - 类图
 - 状态图
 
-第一版面向 macOS 和本机 Draw.io Desktop CLI。`.drawio` 是唯一可编辑事实源；SVG、PNG、PDF 都是按需生成的导出物。
+当前面向 macOS 和本机 Draw.io Desktop CLI。`.drawio` 是唯一可编辑事实源；SVG、PNG、PDF 都是按需生成的导出物。
 
 ## 工作方式
 
@@ -55,13 +55,13 @@ python3 scripts/validate_drawio.py --check-rendered-edges \
   '/absolute/path/to/diagram.drawio'
 ```
 
-运行校验器单测：
+运行单元测试：
 
 ```bash
-python3 scripts/test_validate_drawio.py
+python3 -m unittest discover -s tests -v
 ```
 
-脚本检查 Draw.io XML 结构、文本框几何，以及渲染后的连线交叉和穿节点问题。通过这些检查仍不等于文字和整体视觉验收通过。
+校验器检查 Draw.io XML 结构、文本框几何，以及渲染后的连线交叉和穿节点问题。交付脚本把静态校验、渲染后连线检查、视觉检查记录、导出和目标文件替换绑定到同一候选快照。通过脚本检查仍不等于文字和整体视觉验收通过。
 
 ## 硬性验收
 
@@ -78,10 +78,14 @@ python3 scripts/test_validate_drawio.py
 ```text
 SKILL.md                    工作流、边界和验收规则
 agents/openai.yaml          Codex 显示信息和显式调用策略
-references/                 执行、XML、Mermaid 和绘图规范
-references/default-visual-style.json  新图默认视觉规范
-scripts/validate_drawio.py            XML、文本框和渲染连线校验器
-scripts/test_validate_drawio.py       校验器单元测试
+references/execution.md     本机工具、候选文件和交付流程
+references/xml.md           Draw.io XML 编辑和布局规则
+references/mermaid.md       Mermaid 临时创作输入规则
+references/style.json       新图默认视觉规范
+references/cases.json       可选结构案例索引
+scripts/validate_drawio.py  XML、文本框和渲染连线校验器
+scripts/deliver_drawio.py   候选校验、导出和原子交付脚本
+tests/                      校验器和交付脚本单元测试
 ```
 
 参考案例只提供结构模式，不能替代当前项目的事实，也不能直接复制历史项目内容或视觉样式。

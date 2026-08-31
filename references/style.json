@@ -1,0 +1,127 @@
+{
+  "name": "semantic-architecture-pastel-default",
+  "provenance": {
+    "source": "Agents365-ai/drawio-skill",
+    "license": "MIT"
+  },
+  "application": {
+    "new_diagrams": "default",
+    "existing_diagrams": "preserve unless the user explicitly asks to restyle or redraw"
+  },
+  "canvas": {
+    "background": "#FFFFFF"
+  },
+  "palette": {
+    "service": {
+      "fillColor": "#DBEAFE",
+      "strokeColor": "#2563EB",
+      "use": "core business services, ordinary modules, and first-party application components"
+    },
+    "control": {
+      "fillColor": "#EDE9FE",
+      "strokeColor": "#7C3AED",
+      "use": "schedulers, orchestrators, controllers, and control-plane components"
+    },
+    "storage": {
+      "fillColor": "#CCFBF1",
+      "strokeColor": "#0F766E",
+      "use": "databases, object storage, file systems, caches, and other persistent data stores"
+    },
+    "messaging": {
+      "fillColor": "#FEF3C7",
+      "strokeColor": "#D97706",
+      "use": "message queues, event buses, asynchronous jobs, and buffered work pools"
+    },
+    "external": {
+      "fillColor": "#F1F5F9",
+      "strokeColor": "#64748B",
+      "use": "external systems, third-party services, and neutral context"
+    },
+    "participant": {
+      "fillColor": "#F8FAFC",
+      "strokeColor": "#475569",
+      "use": "users, clients, upstream callers, terminals, and browsers"
+    },
+    "observability": {
+      "fillColor": "#CFFAFE",
+      "strokeColor": "#0E7490",
+      "use": "monitoring, logs, traces, metrics, and alerting"
+    },
+    "risk": {
+      "fillColor": "#FEE2E2",
+      "strokeColor": "#DC2626",
+      "use": "confirmed errors, risks, exceptional paths, and deprecated elements; prefer a border or badge over a large red fill"
+    }
+  },
+  "status_badges": {
+    "healthy": {
+      "fillColor": "#DCFCE7",
+      "strokeColor": "#15803D",
+      "label": "正常"
+    },
+    "warning": {
+      "fillColor": "#FEF3C7",
+      "strokeColor": "#D97706",
+      "label": "警告"
+    },
+    "error": {
+      "fillColor": "#FEE2E2",
+      "strokeColor": "#DC2626",
+      "label": "故障"
+    },
+    "planned": {
+      "fillColor": "#F8FAFC",
+      "strokeColor": "#64748B",
+      "label": "待建设",
+      "style": "dashed=1"
+    },
+    "deprecated": {
+      "fillColor": "#F1F5F9",
+      "strokeColor": "#DC2626",
+      "label": "已废弃",
+      "style": "dashed=1"
+    }
+  },
+  "vertices": {
+    "common_style": "whiteSpace=wrap;html=1;strokeWidth=1;shadow=0;glass=0;sketch=0",
+    "service_shape": "rounded=1",
+    "control_shape": "rounded=1",
+    "storage_shape": "shape=cylinder3",
+    "decision_shape": "rhombus",
+    "external_shape": "rounded=1;dashed=1",
+    "container_shape": "swimlane;startSize=30",
+    "corner_radius": {
+      "compact_card_arc_size": "10-14",
+      "large_background_container_arc_size": 4,
+      "large_background_container_max_arc_size": 4,
+      "large_background_container_min_width": 300,
+      "large_background_container_min_height": 300
+    },
+    "baseline_node_size": {
+      "width": 160,
+      "height": 60
+    }
+  },
+  "font": {
+    "latin_font_family": "Helvetica",
+    "chinese_font_family": "PingFang SC",
+    "ordinary_size": 12,
+    "title_or_focus_size": 14,
+    "focus_bold": true,
+    "color": "#0F172A"
+  },
+  "edges": {
+    "style": "edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#334155;strokeWidth=1.5;endArrow=classic;endFill=1",
+    "label_size": 12,
+    "label_color": "#0F172A",
+    "relationship_styles": {
+      "synchronous": "strokeColor=#334155;strokeWidth=1.5;dashed=0",
+      "main_path": "strokeColor=#334155;strokeWidth=2",
+      "asynchronous": "strokeColor=#334155;strokeWidth=1.5;dashed=1;dashPattern=6 4",
+      "observability_or_state_feedback": "strokeColor=#64748B;strokeWidth=1.5;dashed=1;dashPattern=1 4",
+      "supporting_dependency": "strokeColor=#64748B;strokeWidth=1.5",
+      "error_failure_or_timeout": "strokeColor=#DC2626;strokeWidth=1.5",
+      "highlighted_observability": "strokeColor=#0E7490;strokeWidth=1.5;dashed=1;dashPattern=1 4"
+    }
+  }
+}

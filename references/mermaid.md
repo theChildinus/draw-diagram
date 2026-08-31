@@ -1,8 +1,5 @@
 # Mermaid 临时创作参考
 
-来源：`jgraph/drawio-mcp/shared/mermaid-reference.md`。
-同步日期：2026-08-13。
-
 仅用于新建标准流程图、时序图、ER 图、类图和状态图。Mermaid 文件是临时输入，转换后的 `.drawio` 才是事实源。
 
 ## 通用规则
