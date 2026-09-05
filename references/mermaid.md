@@ -136,12 +136,13 @@ stateDiagram-v2
 
 ## 有限样式能力
 
-只在简单图中使用少量类样式：
+只在简单图中使用少量类样式；普通节点保持中性，强调色只用于核心步骤：
 
 ~~~mermaid
 flowchart LR
   A["开始"]:::primary --> B["完成"]
-  classDef primary fill:#DBEAFE,stroke:#2563EB,color:#0F172A
+  classDef default fill:#FFFFFF,stroke:#626B73,stroke-width:1.25px,color:#252B31
+  classDef primary fill:#EFF3F6,stroke:#45637A,stroke-width:1.5px,color:#2D4E67
 ~~~
 
 转换后仍须检查字体族、字号层级、文本框边界、连线和箭头。无法通过时不要继续堆 Mermaid 样式，转到 XML 局部精修。
