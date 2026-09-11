@@ -25,6 +25,86 @@ from deliver_drawio import (
 from validate_drawio import Issue, validate_file as real_validate_file
 
 
+def routed_document(*, x: int = 20, port: str = "0.5", parent: str = "1", label: str = "调用") -> bytes:
+    return f'''<mxfile><diagram name="Page-1"><mxGraphModel><root>
+      <mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="a" vertex="1" parent="1"><mxGeometry x="{x}" y="20" width="80" height="40" as="geometry"/></mxCell>
+      <mxCell id="b" vertex="1" parent="1"><mxGeometry x="220" y="20" width="80" height="40" as="geometry"/></mxCell>
+      <mxCell id="e" edge="1" source="a" target="b" parent="{parent}" value="{label}" style="exitX=1;exitY={port};">
+        <mxGeometry relative="1" as="geometry"/>
+      </mxCell>
+    </root></mxGraphModel></diagram></mxfile>'''.encode()
+
+
+class AutomaticEdgeCheckTest(unittest.TestCase):
+    def test_routing_changes_enable_render_checks_without_a_flag(self) -> None:
+        variants = [routed_document(x=50), routed_document(port="0.25"),
+                    routed_document(parent="a"),
+                    routed_document().replace(b'relative="1" as="geometry"/>',
+                        b'relative="1" as="geometry"><Array as="points"><mxPoint x="150" y="100"/></Array></mxGeometry>')]
+        for changed in variants:
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                target, candidate = directory / "target.drawio", directory / "candidate.drawio"
+                before = routed_document()
+                target.write_bytes(before)
+                candidate.write_bytes(changed)
+                with patch("deliver_drawio.validate_file", return_value=(1, [])) as validate:
+                    code, receipt = deliver(candidate, target, expected_target_sha256=sha256(before),
+                        visual_risk="local", visual_review="passed", reviewed_candidate_sha256=sha256(changed))
+                self.assertEqual(0, code)
+                self.assertTrue(validate.call_args.kwargs["check_rendered_edges"])
+                self.assertTrue(receipt["validation"]["rendered_edge_check"])
+
+    def test_new_diagram_with_edges_gets_render_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            candidate, target = directory / "candidate.drawio", directory / "new.drawio"
+            data = routed_document()
+            candidate.write_bytes(data)
+            with patch("deliver_drawio.validate_file", return_value=(1, [])) as validate:
+                code, receipt = deliver(candidate, target, expected_target_sha256="missing",
+                    visual_risk="global", visual_review="passed", reviewed_candidate_sha256=sha256(data))
+            self.assertEqual(0, code)
+            self.assertTrue(validate.call_args.kwargs["check_rendered_edges"])
+
+    def test_identical_geometry_and_label_changes_do_not_force_a_render(self) -> None:
+        for data in [routed_document(), routed_document(label="更新说明")]:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                candidate, target = directory / "candidate.drawio", directory / "target.drawio"
+                before = routed_document()
+                candidate.write_bytes(data)
+                target.write_bytes(before)
+                with patch("deliver_drawio.validate_file", return_value=(1, [])) as validate:
+                    code, receipt = deliver(candidate, target, expected_target_sha256=sha256(before),
+                        visual_risk="local", visual_review="passed", reviewed_candidate_sha256=sha256(data))
+                self.assertEqual(0, code)
+                self.assertFalse(validate.call_args.kwargs["check_rendered_edges"])
+
+    def test_geometry_change_cannot_claim_no_visual_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            candidate, target = directory / "candidate.drawio", directory / "target.drawio"
+            before = routed_document()
+            candidate.write_bytes(routed_document(x=50))
+            target.write_bytes(before)
+            with patch("deliver_drawio.validate_file", return_value=(1, [])):
+                code, receipt = deliver(candidate, target, expected_target_sha256=sha256(before))
+            self.assertEqual(1, code)
+            self.assertEqual("VISUAL_RISK_UNDERSTATED", receipt["failure"]["code"])
+            self.assertEqual(before, target.read_bytes())
+
+    def test_closer_ports_are_a_worsened_warning(self) -> None:
+        before = Issue("warning", "EDGE_PORT_SPACING", "Page-1", "before", "a",
+                       subject="port:n:a:source:b:source", evidence={"actual_px": 10, "minimum_px": 12})
+        after = Issue("warning", "EDGE_PORT_SPACING", "Page-1", "after", "a",
+                      subject=before.subject, evidence={"actual_px": 5, "minimum_px": 12})
+        result = classify_warnings([after], [before], [])
+        self.assertEqual([after], result.worsened)
+        self.assertEqual([after], result.unaccepted)
+
+
 def drawio_document(marker: str, *, warning: bool = False, duplicate: bool = False) -> bytes:
     extra = ""
     if warning:

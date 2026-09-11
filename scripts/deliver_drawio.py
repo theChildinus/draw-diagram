@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from validate_drawio import Issue, resolve_drawio_cli, validate_file
+from validate_drawio import (
+    Issue, effective_cell_ids, geometry, load_models, parse_style,
+    resolve_drawio_cli, validate_file,
+)
 
 
 RECEIPT_VERSION = 2
@@ -29,6 +32,8 @@ MEASURED_WARNING_CODES = {
     "EDGE_SHORT_START",
     "EDGE_SHORT_MIDDLE",
     "EDGE_SHORT_END",
+    "EDGE_PORT_SPACING",
+    "EDGE_PARALLEL_CLEARANCE",
 }
 VALIDATION_EXCEPTIONS = (
     OSError,
@@ -402,6 +407,41 @@ def validate_visual_review(
             "reviewed candidate SHA-256 is only valid with --visual-review passed",
             exit_code=1,
         )
+
+
+def routing_signature(path: Path) -> tuple[bool, list[object]]:
+    """Compare routing inputs, ignoring labels and non-visual file metadata."""
+    def geometry_tree(element: ET.Element | None) -> object:
+        if element is None:
+            return None
+        return (element.tag, sorted(element.attrib.items()),
+                [geometry_tree(child) for child in element])
+
+    pages: list[object] = []
+    has_edges = False
+    for _, model in load_models(path):
+        cells, _ = effective_cell_ids(model)
+        entries = []
+        for cell, cell_id in cells:
+            has_edges = has_edges or cell.get("edge") == "1"
+            style = parse_style(cell.get("style", ""))
+            routing_style = {key: value for key, value in style.items()
+                             if key not in {"fillcolor", "strokecolor", "fontcolor"}
+                             or style.get("diagramjunction") == "1"}
+            entries.append((cell_id or "", {
+                key: cell.get(key) for key in
+                ("parent", "source", "target", "vertex", "edge", "visible", "collapsed")
+            }, routing_style, geometry_tree(geometry(cell)),
+                cell.get("value") if style.get("autosize") == "1" else None))
+        pages.append(sorted(entries, key=lambda entry: entry[0]))
+    return has_edges, pages
+
+
+def routing_changed(candidate: Path, baseline: Path | None) -> bool:
+    has_edges, candidate_signature = routing_signature(candidate)
+    if not has_edges:
+        return False
+    return baseline is None or candidate_signature != routing_signature(baseline)[1]
 def validation_receipt(
     pages: int,
     issues: Sequence[Issue],
@@ -588,6 +628,12 @@ def deliver(
         snapshot = write_snapshot(candidate_bytes, candidate, target)
         temporary_paths.append(snapshot)
 
+        automatic_edge_check = routing_changed(snapshot, baseline_snapshot)
+        if automatic_edge_check and visual_risk == "none":
+            return reject(receipt, "VISUAL_RISK_UNDERSTATED",
+                "new or changed routing requires local/global visual review")
+        check_rendered_edges = check_rendered_edges or automatic_edge_check
+
         pages, issues = validate_file(
             snapshot,
             check_rendered_edges=check_rendered_edges,
@@ -628,6 +674,7 @@ def deliver(
             warning_delta=warning_delta,
             max_issues=max_issues,
         )
+        receipt["validation"]["rendered_edge_check_automatic"] = automatic_edge_check
         if errors:
             return reject(
                 receipt,
@@ -811,7 +858,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PAGE=PATH",
         help="Deliver one explicit page as SVG, PNG, or PDF; repeat as needed.",
     )
-    parser.add_argument("--check-rendered-edges", action="store_true")
+    parser.add_argument("--check-rendered-edges", action="store_true",
+        help="Force rendered edge checks; new diagrams with edges and changed routing enable them automatically.")
     parser.add_argument("--drawio-cli", type=Path)
     parser.add_argument(
         "--accept-warning",

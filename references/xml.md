@@ -77,7 +77,18 @@
 </mxCell>
 ~~~
 
-独立文本框必须满足 `../SKILL.md` 中的 `safeX`、`safeY` 公式。顶层标题和图注可以放在默认层，但仍设置 `connectable=0`。
+独立文本框以父图形 `(0, 0)` 为原点，满足以下安全距离；放不下时扩大外框、调整布局或使用内置标签，不降低安全距离。
+
+~~~text
+safeX = max(12 px, min(24 px, width × 8%))
+safeY = max(6 px, min(12 px, height × 12%))
+text.x >= safeX
+text.x + text.width <= width - safeX
+text.y >= safeY
+text.y + text.height <= height - safeY
+~~~
+
+顶层标题和图注可以放在默认层，但仍设置 `connectable=0`。
 UML 类成员行和表格单元格若由 `stackLayout` 或 `tableLayout` 管理，则属于结构化布局内容，不按叠加文本框的安全带公式检查；关系默认仍连接外层类或表格对象。
 
 ## 4. 连线
@@ -90,26 +101,39 @@ UML 类成员行和表格单元格若由 `stackLayout` 或 `tableLayout` 管理�
 </mxCell>
 ~~~
 
-常用风格：
+路由类型如下；关系的线型、主次和颜色统一按 `../SKILL.md` 的“连线和箭头”，不另定义一套语义。
 
 | 图型 | 推荐边样式 |
 |---|---|
 | 流程、架构、网络 | `edgeStyle=orthogonalEdgeStyle;rounded=0` |
 | ER | `edgeStyle=entityRelationEdgeStyle` |
 | 类图、时序消息 | 直线，不设置 `edgeStyle` |
-| 同步调用 | `strokeColor=#67727D;strokeWidth=1.25` 实线 |
-| 主链路 | `strokeColor=#404A53;strokeWidth=1.5`，保留实际关系线型 |
-| 异步消息 | `strokeColor=#67727D;strokeWidth=1.25;dashed=1;dashPattern=6 4` |
-| 监控或状态回传 | `strokeColor=#67727D;strokeWidth=1.25;dashed=1;dashPattern=1 4` |
-| 次要依赖或辅助链路 | `strokeColor=#67727D;strokeWidth=1` 或 `1.25`，保留实际关系线型 |
-| 异常、失败或超时 | 随主链或次要链路；需要突出故障时使用 `strokeColor=#DC2626`，保留实际关系线型、主次线宽和文字标签 |
-| 需要强调的可观测性链路 | `strokeColor=#45637A;strokeWidth=1.5;dashed=1;dashPattern=1 4` |
 
 - 边连接外框，不连接文本框。
 - 不手写折点作为默认方案。先调整节点、端口和通道；局部问题只修局部路由。
-- 只有确切的几何意图才设置 `exitX`、`exitY`、`entryX`、`entryY`。
+- 多条关系连接同一节点时，明确设置各自的 `exitX`、`exitY`、`entryX`、`entryY`，保留稳定的独立端口；单条简单连接可以自动选择。
 - 跨容器边使用公共层 `parent="1"`，避免被容器裁切。
 - 边标签保持短小，直接写在边的 `value` 上。
+
+### 多连接节点的端口分配
+
+先按另一端的位置排序，分别为入线、出线和混合方向分配端口及走线通道。只在拥挤节点需要时记录 `edge ID → 两端节点/边/位置 → 通道`，不为简单图另建维护文件。
+
+例如宽 `160 px` 节点的三条底部出线可分别设置 `exitX=0.25/0.5/0.75;exitY=1;exitPerimeter=1;`，横向间隔为 `40 px`。目标端也要分别分配入口；只移动折点不会释放已经共用的锚点。间距按节点实际尺寸计算，不能机械复制比例。
+
+空间不足时依次调整端口所在边、节点间距或尺寸、局部通道。保持关系方向和端点语义，不用删除边或虚构中间业务组件来避线。
+
+### 明确的分支点与总线
+
+真实存在的分支可用可见的小圆点表达，共用干线只绘制为一条边，再从连接点分出各支路。总线沿线需要多个接入位置时也按此表示，不叠画多份公共线段。
+
+~~~xml
+<mxCell id="junction-1" value="" style="ellipse;diagramJunction=1;fillColor=#404A53;strokeColor=#404A53;" vertex="1" parent="1">
+  <mxGeometry x="300" y="240" width="8" height="8" as="geometry"/>
+</mxCell>
+~~~
+
+只有显式标记 `diagramJunction=1`、有填充且宽高均不超过 `16 px` 的可见圆点允许相接边共享端口。该例外不豁免重叠线段、穿节点或远离连接点的交叉。普通业务节点、队列和数据库不能使用此标记。
 
 ## 5. 容器和父子关系
 

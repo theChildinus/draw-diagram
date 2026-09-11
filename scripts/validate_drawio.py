@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate deterministic Draw.io XML and text-box geometry constraints."""
+"""Validate Draw.io structure, text boundaries and rendered connection geometry."""
 
 from __future__ import annotations
 
@@ -53,6 +53,11 @@ SUPPORTED_FIXES_BY_CODE: dict[str, tuple[str, ...]] = {
         "expand_owner_or_use_shape_value",
     ),
     "EDGE_RENDER_PARSE": ("inspect_exported_edge",),
+    "EDGE_RENDER_MISSING": ("reexport_visible_edge", "inspect_edge_visibility"),
+    "EDGE_SHARED_PORT": ("allocate_distinct_ports", "model_explicit_junction"),
+    "EDGE_PORT_SPACING": ("spread_ports_or_resize_node",),
+    "EDGE_OVERLAP": ("separate_edge_routes", "draw_shared_trunk_once"),
+    "EDGE_PARALLEL_CLEARANCE": ("increase_routing_channel_spacing",),
     "EDGE_JUMP_STYLE_REVIEW": (
         "remove_jump_style",
         "record_manual_crossing_review",
@@ -237,7 +242,7 @@ def parse_transform(value: str | None) -> Matrix:
 
 
 PATH_TOKEN = re.compile(
-    r"[AaCcHhLlMmQqSsTtVvZz]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r"[A-Za-z]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 )
 
 
@@ -480,6 +485,157 @@ def proper_intersection(first: Segment, second: Segment, epsilon: float = 1e-6) 
 
 def near(point: Point, candidate: Point | None, tolerance: float = 3.0) -> bool:
     return candidate is not None and math.dist(point, candidate) <= tolerance
+
+
+def parallel_run(first: Segment, second: Segment) -> tuple[float, float] | None:
+    """Return perpendicular clearance and positive shared projected length."""
+    (px, py), (qx, qy) = first
+    (ax, ay), (bx, by) = second
+    length, other_length = segment_length(first), segment_length(second)
+    if min(length, other_length) <= 0.01:
+        return None
+    ux, uy = (qx - px) / length, (qy - py) / length
+    vx, vy = (bx - ax) / other_length, (by - ay) / other_length
+    if abs(ux * vy - uy * vx) > 1e-6:
+        return None
+    start = (ax - px) * ux + (ay - py) * uy
+    end = (bx - px) * ux + (by - py) * uy
+    overlap = min(length, max(start, end)) - max(0.0, min(start, end))
+    if overlap <= 0.01:
+        return None
+    distance = abs((ax - px) * uy - (ay - py) * ux)
+    return distance, overlap
+
+
+def hidden_cell(cell: ET.Element, by_id: dict[str, ET.Element]) -> bool:
+    """Explicitly hidden layers and children of collapsed containers are not exported."""
+    seen: set[str] = set()
+    current: ET.Element | None = cell
+    while current is not None:
+        if current.get("visible") == "0" or (current is not cell and current.get("collapsed") == "1"):
+            return True
+        parent = current.get("parent")
+        if not parent or parent in seen:
+            break
+        seen.add(parent)
+        current = by_id.get(parent)
+    return False
+
+
+def explicit_junction(cell: ET.Element) -> bool:
+    style = parse_style(cell.get("style", ""))
+    box = geometry(cell)
+    if style.get("diagramjunction") != "1" or box is None:
+        return False
+    return (
+        cell.get("vertex") == "1"
+        and ("ellipse" in style or style.get("shape") == "ellipse")
+        and 0 < number(box.get("width")) <= 16
+        and 0 < number(box.get("height")) <= 16
+        and style.get("fillcolor", "#000000").lower() not in {"none", "transparent"}
+        and number(style.get("opacity"), 100) > 0
+        and number(style.get("fillopacity"), 100) > 0
+    )
+
+
+def boundary_endpoint(point: Point, neighbor: Point, bounds: tuple[float, float, float, float] | None) -> Point:
+    """Project a shortened orthogonal arrow stroke to its node's boundary.
+
+    Inside-box and diagonal endpoints stay as rendered; no arbitrary endpoint
+    is snapped to a distant corner or to another side of the node.
+    """
+    if bounds is None:
+        return point
+    left, top, right, bottom = bounds
+    x, y = point
+    if left <= x <= right and top <= y <= bottom:
+        return point
+    if abs(y - neighbor[1]) < 0.01 and top <= y <= bottom:
+        if x < left and x > neighbor[0]:
+            return left, y
+        if x > right and x < neighbor[0]:
+            return right, y
+    if abs(x - neighbor[0]) < 0.01 and left <= x <= right:
+        if y < top and y > neighbor[1]:
+            return x, top
+        if y > bottom and y < neighbor[1]:
+            return x, bottom
+    return point
+
+
+def connection_issues(page: str, edges: list[RenderedEdge], by_id: dict[str, ET.Element],
+                      groups: dict[str, tuple[ET.Element, Matrix]]) -> list[Issue]:
+    issues: list[Issue] = []
+    ports: dict[str, list[tuple[str, str, Point]]] = {}
+    for edge in edges:
+        for node, role, point, neighbor in [
+            (edge.source, "source", edge.start, edge.segments[0][1]),
+            (edge.target, "target", edge.end, edge.segments[-1][0]),
+        ]:
+            if node is None or point is None:
+                continue
+            bounds = None
+            if node in groups:
+                try:
+                    bounds = rendered_shape_bounds(*groups[node])
+                except (IndexError, ValueError):
+                    pass
+            ports.setdefault(node, []).append((edge.cell_id, role, boundary_endpoint(point, neighbor, bounds)))
+
+    for node, connections in sorted(ports.items()):
+        if node in by_id and node in groups and explicit_junction(by_id[node]):
+            try:
+                if rendered_shape_bounds(*groups[node]) is not None:
+                    continue
+            except (IndexError, ValueError):
+                pass
+        connections.sort()
+        for index, (first, first_role, first_point) in enumerate(connections):
+            for second, second_role, second_point in connections[index + 1:]:
+                distance = math.dist(first_point, second_point)
+                if distance >= 12.0 - 0.01:
+                    continue
+                shared = distance <= 0.01
+                issues.append(Issue(
+                    "error" if shared else "warning",
+                    "EDGE_SHARED_PORT" if shared else "EDGE_PORT_SPACING", page,
+                    f"{first} ({first_role}) and {second} ({second_role}) use ports {distance:.2f}px apart on {node}",
+                    first, subject=f"port:{node}:{first}:{first_role}:{second}:{second_role}",
+                    evidence={"node": node, "other_edge": second, "roles": [first_role, second_role],
+                              "actual_px": round(distance, 3), "minimum_px": 12.0,
+                              "points": [first_point, second_point]},
+                ))
+
+    for index, first in enumerate(edges):
+        for second in edges[index + 1:]:
+            overlap = 0.0
+            for a in first.segments:
+                for b in second.segments:
+                    run = parallel_run(a, b)
+                    if run is not None and run[0] <= 0.01:
+                        overlap = max(overlap, run[1])
+            pair = sorted([first.cell_id, second.cell_id])
+            subject = f"edges:{pair[0]}:{pair[1]}"
+            if overlap > 1.0:
+                issues.append(Issue("error", "EDGE_OVERLAP", page,
+                    f"{first.cell_id} and {second.cell_id} share a line segment of {overlap:.1f}px",
+                    pair[0], subject=subject,
+                    evidence={"edges": pair, "overlap_px": round(overlap, 3)}))
+                continue
+            close_runs = []
+            for a in first.straight_segments:
+                for b in second.straight_segments:
+                    run = parallel_run(a, b)
+                    if run is not None and 0.01 < run[0] < 12.0 - 0.01 and run[1] >= 16.0:
+                        close_runs.append(run)
+            if close_runs:
+                distance, length = min(close_runs)
+                issues.append(Issue("warning", "EDGE_PARALLEL_CLEARANCE", page,
+                    f"{first.cell_id} and {second.cell_id} run {distance:.1f}px apart for {length:.1f}px",
+                    pair[0], subject=subject,
+                    evidence={"edges": pair, "actual_px": round(distance, 3),
+                              "minimum_px": 12.0, "parallel_run_px": round(length, 3)}))
+    return issues
 
 
 def point_inside_shape(point: Point, bounds: tuple[float, float, float, float], style: dict[str, str]) -> bool:
@@ -941,11 +1097,21 @@ def validate_model(page: str, model: ET.Element) -> list[Issue]:
 def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) -> list[Issue]:
     issues: list[Issue] = []
     cells, _ = effective_cell_ids(model)
+    by_id = {cell_id: cell for cell, cell_id in cells if cell_id}
     groups = rendered_cell_groups(svg_root)
     edges: list[RenderedEdge] = []
 
     for cell, cell_id in cells:
-        if not cell_id or cell.get("edge") != "1" or cell_id not in groups:
+        if not cell_id or cell.get("edge") != "1" or hidden_cell(cell, by_id):
+            continue
+        if cell_id not in groups:
+            # Draw.io also hides edges whose terminal or terminal's layer is hidden.
+            if any(endpoint in by_id and hidden_cell(by_id[endpoint], by_id)
+                   for endpoint in (cell.get("source"), cell.get("target"))):
+                continue
+            issues.append(Issue("error", "EDGE_RENDER_MISSING", page,
+                "visible edge has no rendered SVG group", cell_id,
+                evidence={"reason": "missing_group"}))
             continue
         group, matrix = groups[cell_id]
         try:
@@ -953,7 +1119,7 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
         except (IndexError, ValueError) as exc:
             issues.append(
                 Issue(
-                    "warning",
+                    "error",
                     "EDGE_RENDER_PARSE",
                     page,
                     f"cannot parse rendered edge path: {exc}",
@@ -962,7 +1128,10 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                 )
             )
             continue
-        if rendered_path is None:
+        if rendered_path is None or not rendered_path[0] or not any(segment_length(s) > 0.01 for s in rendered_path[0]):
+            issues.append(Issue("error", "EDGE_RENDER_MISSING", page,
+                "visible edge has no usable rendered path", cell_id,
+                evidence={"reason": "missing_or_empty_path"}))
             continue
         segments, straight_segments = rendered_path
         style = parse_style(cell.get("style", ""))
@@ -1039,6 +1208,9 @@ def validate_rendered_svg(page: str, model: ET.Element, svg_root: ET.Element) ->
                     evidence={"actual_px": lengths[-1], "minimum_px": 24.0},
                 )
             )
+
+    edges.sort(key=lambda edge: edge.cell_id)
+    issues.extend(connection_issues(page, edges, by_id, groups))
 
     for index, first in enumerate(edges):
         for second in edges[index + 1 :]:
@@ -1210,7 +1382,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check-rendered-edges",
         action="store_true",
-        help="Export temporary SVG pages and check crossings, shape intersections, and short edge segments.",
+        help="Check visible edge coverage, ports, overlapping/close routes, crossings, obstacles and short segments.",
     )
     parser.add_argument(
         "--drawio-cli",

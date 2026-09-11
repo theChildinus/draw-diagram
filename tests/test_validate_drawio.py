@@ -184,7 +184,7 @@ class RenderedEdgeTest(unittest.TestCase):
 
         self.assertIn("EDGE_CROSSING", {issue.code for issue in issues})
 
-    def test_allows_edges_to_meet_at_shared_endpoint(self) -> None:
+    def test_shared_endpoint_is_reported_as_a_port_problem(self) -> None:
         model = rendered_model(
             edge_cell("edge-a", "source-a", "target-a"),
             edge_cell("edge-b", "source-a", "target-b"),
@@ -197,6 +197,107 @@ class RenderedEdgeTest(unittest.TestCase):
         issues = validate_rendered_svg("Page-1", model, svg)
 
         self.assertNotIn("EDGE_CROSSING", {issue.code for issue in issues})
+        self.assertIn("EDGE_SHARED_PORT", {issue.code for issue in issues})
+
+    def test_shared_incoming_and_mixed_ports_are_checked(self) -> None:
+        for first, second, paths in [
+            (edge_cell("a", "source-a", "target-a"), edge_cell("b", "source-b", "target-a"),
+             ("M -80 0 L 0 0", "M 0 -80 L 0 0")),
+            (edge_cell("a", "source-a", "target-a"), edge_cell("b", "target-a", "target-b"),
+             ("M -80 0 L 0 0", "M 0 0 L 0 80")),
+        ]:
+            with self.subTest(paths=paths):
+                issues = validate_rendered_svg("Page-1", rendered_model(first, second),
+                    svg_with_cells(svg_edge("a", paths[0]), svg_edge("b", paths[1])))
+                self.assertIn("EDGE_SHARED_PORT", {i.code for i in issues})
+
+    def test_distinct_ports_have_measured_clearance(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-a", "target-b"))
+        for gap in (5, 12, 20):
+            with self.subTest(gap=gap):
+                issues = validate_rendered_svg("Page-1", model, svg_with_cells(
+                    svg_edge("a", "M 0 0 L 80 0"), svg_edge("b", f"M 0 {gap} L 80 {gap}")))
+                self.assertEqual(gap < 12, any(i.code == "EDGE_PORT_SPACING" for i in issues))
+                self.assertEqual(gap < 12, any(i.code == "EDGE_PARALLEL_CLEARANCE" for i in issues))
+
+    def test_collinear_overlap_in_both_directions_and_diagonal(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-b", "target-b"))
+        for paths in [("M 0 0 L 100 0", "M 20 0 L 120 0"),
+                      ("M 0 0 L 100 0", "M 120 0 L 20 0"),
+                      ("M 0 0 L 100 100", "M 20 20 L 120 120")]:
+            with self.subTest(paths=paths):
+                issues = validate_rendered_svg("Page-1", model, svg_with_cells(
+                    svg_edge("a", paths[0]), svg_edge("b", paths[1])))
+                issue = next(i for i in issues if i.code == "EDGE_OVERLAP")
+                self.assertEqual("error", issue.severity)
+                self.assertGreater(issue.evidence["overlap_px"], 79)
+
+    def test_separate_collinear_runs_do_not_overlap(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-b", "target-b"))
+        issues = validate_rendered_svg("Page-1", model, svg_with_cells(
+            svg_edge("a", "M 0 0 L 80 0"), svg_edge("b", "M 100 0 L 180 0")))
+        self.assertEqual([], issues)
+
+    def test_explicit_visible_junction_allows_a_shared_port(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-a", "target-b"))
+        node = model.find(".//mxCell[@id='source-a']")
+        node.set("style", "ellipse;diagramJunction=1;fillColor=#404A53;")
+        svg = svg_with_cells(
+            '<g data-cell-id="source-a"><ellipse cx="0.5" cy="0.5" rx="5" ry="5" fill="#404A53" pointer-events="all"/></g>',
+            svg_edge("a", "M 0 0 L 80 0"), svg_edge("b", "M 0 0 L 0 80"))
+        self.assertEqual([], validate_rendered_svg("Page-1", model, svg))
+        node.find("mxGeometry").set("width", "160")
+        issues = validate_rendered_svg("Page-1", model, svg)
+        self.assertIn("EDGE_SHARED_PORT", {i.code for i in issues})
+
+    def test_junction_does_not_exempt_duplicate_trunk(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-a", "target-b"))
+        model.find(".//mxCell[@id='source-a']").set("style", "ellipse;diagramJunction=1;")
+        issues = validate_rendered_svg("Page-1", model, svg_with_cells(
+            svg_edge("a", "M 0 0 L 80 0"), svg_edge("b", "M 0 0 L 120 0")))
+        self.assertIn("EDGE_OVERLAP", {i.code for i in issues})
+
+    def test_missing_or_unusable_visible_path_is_an_error(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"))
+        for svg in [svg_with_cells(), svg_with_cells('<g data-cell-id="a"/>'),
+                    svg_with_cells(svg_edge("a", "M 0 0")),
+                    svg_with_cells(svg_edge("a", "M 0 0 X 80 0"))]:
+            with self.subTest(svg=ET.tostring(svg)):
+                issues = validate_rendered_svg("Page-1", model, svg)
+                self.assertTrue(any(i.severity == "error" and i.code.startswith("EDGE_RENDER") for i in issues))
+
+    def test_explicitly_hidden_edges_do_not_need_rendered_paths(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"))
+        model.find(".//mxCell[@id='a']").set("visible", "0")
+        self.assertEqual([], validate_rendered_svg("Page-1", model, svg_with_cells()))
+
+    def test_hidden_layers_and_terminals_do_not_create_missing_path_errors(self) -> None:
+        for cell_id in ("1", "source-a"):
+            model = rendered_model(edge_cell("a", "source-a", "target-a"))
+            model.find(f".//mxCell[@id='{cell_id}']").set("visible", "0")
+            self.assertEqual([], validate_rendered_svg("Page-1", model, svg_with_cells()))
+
+    def test_junction_marker_without_a_rendered_dot_is_not_an_exemption(self) -> None:
+        model = rendered_model(edge_cell("a", "source-a", "target-a"),
+                               edge_cell("b", "source-a", "target-b"))
+        model.find(".//mxCell[@id='source-a']").set("style", "ellipse;diagramJunction=1;")
+        svg = svg_with_cells('<g data-cell-id="source-a"/>',
+            svg_edge("a", "M 0 0 L 80 0"), svg_edge("b", "M 0 0 L 0 80"))
+        self.assertIn("EDGE_SHARED_PORT", {i.code for i in validate_rendered_svg("Page-1", model, svg)})
+
+    def test_mixed_ports_use_shape_boundary_not_shortened_arrow_stroke(self) -> None:
+        model = rendered_model(edge_cell("a", "source-b", "source-a"),
+                               edge_cell("b", "source-a", "target-b"))
+        svg = svg_with_cells(
+            '<g data-cell-id="source-a"><rect x="100.5" y="0.5" width="80" height="80" fill="#fff" pointer-events="all"/></g>',
+            svg_edge("a", "M 0 40 L 91 40"), svg_edge("b", "M 100 40 L 20 40"))
+        issues = validate_rendered_svg("Page-1", model, svg)
+        self.assertIn("EDGE_SHARED_PORT", {i.code for i in issues})
 
     def test_reports_edge_through_non_endpoint_shape(self) -> None:
         model = rendered_model(
